@@ -389,5 +389,40 @@ public class DbService : IDbService
         finalCmd.Parameters.AddWithValue("@id", id);
         await finalCmd.ExecuteNonQueryAsync();
     }
+    public async Task DeleteCustomerAndDataAsync(int id)
+    {
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+
+        // 1. DYNAMIC STEP: Find all Rental IDs belonging to this customer
+        var rentalIds = new List<int>();
+        var findCmd = new SqlCommand("SELECT RentalId FROM Rental WHERE CustomerId = @id", connection);
+        findCmd.Parameters.AddWithValue("@id", id);
+    
+        await using (var reader = await findCmd.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                rentalIds.Add(reader.GetInt32(0)); // Now rentalIds has the REAL database IDs
+            }
+        }
+
+        // 2. LOOP STEP: Delete children for each found ID
+        foreach (var rId in rentalIds)
+        {
+            var itemCmd = new SqlCommand("DELETE FROM Rental_Item WHERE RentalId = @rId", connection);
+            itemCmd.Parameters.AddWithValue("@rId", rId);
+            await itemCmd.ExecuteNonQueryAsync();
+        
+            var rentalCmd = new SqlCommand("DELETE FROM Rental WHERE RentalId = @rId", connection);
+            rentalCmd.Parameters.AddWithValue("@rId", rId);
+            await rentalCmd.ExecuteNonQueryAsync();
+        }
+
+        // 3. FINAL STEP: Delete the Customer
+        var custCmd = new SqlCommand("DELETE FROM Customer WHERE CustomerId = @id", connection);
+        custCmd.Parameters.AddWithValue("@id", id);
+        await custCmd.ExecuteNonQueryAsync();
+    }
 }
 }
