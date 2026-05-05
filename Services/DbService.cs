@@ -256,4 +256,138 @@ public class DbService : IDbService
             throw;
         }
     }
+    
+    
+    using Microsoft.Data.SqlClient;
+using Kolokwium.DTOs;
+using Kolokwium.Exceptions;
+
+namespace Kolokwium.Services;
+
+public class DbService : IDbService
+{
+    private readonly string _connectionString;
+
+    public DbService(IConfiguration configuration)
+    {
+        _connectionString = configuration.GetConnectionString("DefaultConnection") ?? string.Empty;
+    }
+
+    // ===========================================================================
+    // 1. GET - Using a WHILE loop to read multiple database rows
+    // ===========================================================================
+    public async Task<GetCustomerDto> GetCustomerRentalsAsync(int customerId)
+    {
+        var query = "SELECT FirstName, LastName, RentalId FROM Customer JOIN ... WHERE CustomerId = @id";
+        
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+
+        await using var command = new SqlCommand(query, connection);
+        command.Parameters.AddWithValue("@id", customerId);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        
+        GetCustomerDto? result = null;
+
+        // The WHILE loop is used here because the DB returns a stream of rows.
+        // We call ReadAsync() to move to the next row until there are none left.
+        while (await reader.ReadAsync())
+        {
+            if (result == null)
+            {
+                result = new GetCustomerDto 
+                { 
+                    FirstName = reader.GetString(0), 
+                    Rentals = new List<RentalDto>() 
+                };
+            }
+            // Add a new rental object for every row found
+            result.Rentals.Add(new RentalDto { RentalId = reader.GetInt32(2) });
+        }
+
+        return result ?? throw new NotFoundException("Customer not found");
+    }
+
+    // ===========================================================================
+    // 2. POST - Using a FOREACH loop to insert a collection of items
+    // ===========================================================================
+    public async Task CreateRentalWithMoviesAsync(int id, CreateRentalWithMoviesDto dto)
+    {
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+        
+        // We use a transaction because we are inserting multiple things in a loop
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        try
+        {
+            // First: Insert the main Rental record (No loop needed for the parent)
+            var rentalId = 101; // Imagine we execute a command and get the new ID here
+
+            // The FOREACH loop is used to process the list of movies sent in the Body
+            foreach (var movie in dto.Movies)
+            {
+                var cmd = new SqlCommand("INSERT INTO Rental_Item (RentalId, MovieId) VALUES (@r, @m)", 
+                    connection, (SqlTransaction)transaction);
+                cmd.Parameters.AddWithValue("@r", rentalId);
+                cmd.Parameters.AddWithValue("@m", movie.Id);
+                
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            await transaction.CommitAsync();
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+
+    // ===========================================================================
+    // 3. PUT - Using a FOREACH loop to update a batch of records
+    // ===========================================================================
+    public async Task UpdateRentalsStatusAsync(int id, List<int> rentalIds)
+    {
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+
+        // The FOREACH loop allows the user to update many IDs in one request
+        foreach (var rId in rentalIds)
+        {
+            var cmd = new SqlCommand("UPDATE Rental SET StatusId = 2 WHERE RentalId = @rId", connection);
+            cmd.Parameters.AddWithValue("@rId", rId);
+            
+            var rowsAffected = await cmd.ExecuteNonQueryAsync();
+            if (rowsAffected == 0) throw new NotFoundException($"Rental {rId} not found");
+        }
+    }
+
+    // ===========================================================================
+    // 4. DELETE - Using a FOREACH loop to clean up related data
+    // ===========================================================================
+    public async Task DeleteCustomerAndDataAsync(int id)
+    {
+        // First, we find all items that need to be deleted (e.g., rental IDs)
+        List<int> idsToDelete = new List<int> { 1, 2, 3 }; 
+
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+
+        // The FOREACH loop handles deleting "child" records before the "parent"
+        // This prevents Foreign Key constraint errors in the database.
+        foreach (var childId in idsToDelete)
+        {
+            var cmd = new SqlCommand("DELETE FROM Rental_Item WHERE RentalId = @id", connection);
+            cmd.Parameters.AddWithValue("@id", childId);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // Finally, delete the single main Customer (No loop needed)
+        var finalCmd = new SqlCommand("DELETE FROM Customer WHERE CustomerId = @id", connection);
+        finalCmd.Parameters.AddWithValue("@id", id);
+        await finalCmd.ExecuteNonQueryAsync();
+    }
+}
 }
